@@ -1,0 +1,24 @@
+[project]
+name = "minimind-mokio"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "xyavid", email = "xyun3525@gmail.com" }
+]
+requires-python = ">=3.14"
+dependencies = []
+
+[project.scripts]
+minimind-mokio = "minimind_mokio:main"
+
+[build-system]
+requires = ["uv_build>=0.12.1,<0.13.0"]
+build-backend = "uv_build"
+
+dependencies = [
+    "numpy>=2.3.4",
+    "pandas>=2.3.3",
+    "torch>=2.9.0",
+    "transformers>=4.57.1",
+]
