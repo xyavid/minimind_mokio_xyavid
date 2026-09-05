@@ -7,7 +7,13 @@ authors = [
     { name = "xyavid", email = "xyun3525@gmail.com" }
 ]
 requires-python = ">=3.14"
-dependencies = []
+dependencies = [
+    "numpy>=2.3.4",
+    "pandas>=2.3.3",
+    "torch>=2.10.0",
+    "transformers>=4.57.1",
+]
+
 
 [project.scripts]
 minimind-mokio = "minimind_mokio:main"
@@ -16,9 +22,3 @@ minimind-mokio = "minimind_mokio:main"
 requires = ["uv_build>=0.12.1,<0.13.0"]
 build-backend = "uv_build"
 
-dependencies = [
-    "numpy>=2.3.4",
-    "pandas>=2.3.3",
-    "torch>=2.9.0",
-    "transformers>=4.57.1",
-]
