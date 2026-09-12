@@ -97,7 +97,7 @@ class RMSNorm(nn.Module):
     def forward(self,x):
         #这里的.type_as是为了恢复x的16位，本身x是float16，使用了.float()后变为了float32（为了不漏算数据），最后使用这个变回float16
         return self.weight*self._norm(x.float()).type_as(x)
-#yarn编写
+#yarn编写 RoPE预计算
 def precompute_freqs_cis(dim:int,end:int(32*1024),rope_base,rope_scaling:Optional[dict]=None):
     #初始化RoPE频率
     freqs,attn_factor=(1.0/(rope_base**(torch.arange(0,dim,2)[:dim//2].float()/dim))),1.0
@@ -318,3 +318,77 @@ class MokioMindBlock(nn.Module):
         #FFN
         hidden_states=hidden_states+self.mlp(self.post_attention_layernorm(hidden_states))
         return hidden_states,present_key_value
+
+class MokioMindModel(nn.Module):
+    def __init__(self, config:MokioMindConfig):
+        super().__init__()
+        self.vocab_size,self.num_hidden_layers=(
+            config.vocab_size,
+            config.num_hidden_layers
+        )
+
+        self.embed_tokens=nn.Embedding(config.vocab_size,config.hidden_states)
+
+        self.dropout=nn.Dropout(config.dropout)
+
+        self.layers=nn.ModuleList([MokioMindBlock(i,config) for i in range(self.num_hidden_layers)])
+
+        self.norm=RMSNorm(config.hidden_size,eps=config.rms_norm_eps)
+
+        #RoPE预计算
+        self.freq_cos,self.freq_sin = precompute_freqs_cis(
+            dim=config.hidden_size // config.num_attention_heads,
+            end=config.max_position_embeddings,
+            rope_base=config.rope_theta,
+            rope_scaling=config.rope_scaling
+        )
+
+        self.register_buffer("freqs_cos",self.freq_cos,persistent=False)
+        self.register_buffer("freqs_sin",self.freq_sin,persistent=False)
+
+    def forward(
+            self,
+            input_ids:Optional[torch.Tensor],
+            attention_mask:Optional[torch.Tensor]=None,
+            past_key_values=None,
+            use_cache:bool=False,
+            *kwargs,
+        ):
+            batch_size,seq_len=input_ids.shape
+
+            if hasattr(past_key_values,'layers'):
+                past_key_values=None
+
+            past_key_values=past_key_values or [None]*len(self.layers)
+
+            start_pos=(past_key_values[0][0].shape[1] if past_key_values[0] is not None else 0)
+            #embeding+dropout
+            hidden_states=self.dropout(self.embed_tokens(input_ids))
+
+             # Recompute RoPE buffers lost during meta-device init (transformers>=5.x)
+            if self.freqs_cos[0, 0] == 0:
+                freqs_cos, freqs_sin = precompute_freqs_cis(dim=self.config.head_dim, end=self.config.max_position_embeddings, rope_base=self.config.rope_theta, rope_scaling=self.config.rope_scaling)
+                self.freqs_cos, self.freqs_sin = freqs_cos.to(hidden_states.device), freqs_sin.to(hidden_states.device)
+            
+            #位置编码
+            position_embeddings=(
+                self.freq_cos[start_pos:start_pos+seq_len],
+                self.freq_sin[start_pos:start_pos+seq_len]
+            )
+            #缓存列表，收集kv cache
+            presents=[]
+            #Transformer layers
+            for layer_idx,(layer,past_key_value) in enumerate(zip(self.layers,past_key_values)):
+                hidden_states,present=layer(
+                    hidden_states,
+                    position_embeddings,
+                    past_key_value=past_key_value,
+                    use_cache=use_cache,
+                    attention_mask=attention_mask
+                )
+
+                presents.append(present)
+            #RMSNorm
+            hidden_states=self.norm(hidden_states)
+
+            return hidden_states,presents
