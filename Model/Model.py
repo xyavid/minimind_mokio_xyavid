@@ -1,6 +1,6 @@
 from typing import Any
 
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig, PretrainedConfig
 
 #hugging face的类 类似定义模型参数
 class MokioMindConfig(PretrainedConfig):
@@ -76,9 +76,12 @@ class MokioMindConfig(PretrainedConfig):
 import torch
 import torch.nn as nn
 import math
-from typing import Optional,Tuple
+from torch.nn import init
+from typing import Optional,Tuple,List,Union
 from torch.nn import functional as F
 from transformers.activations import ACT2FN
+from transformers import PreTrainedModel, GenerationMixin, PretrainedConfig
+from transformers.modeling_outputs import CausalLMOutputWithPast
 
 #继承nn.Module类
 class RMSNorm(nn.Module):
@@ -102,6 +105,11 @@ def precompute_freqs_cis(dim:int,end:int(32*1024),rope_base,rope_scaling:Optiona
     #初始化RoPE频率
     freqs,attn_factor=(1.0/(rope_base**(torch.arange(0,dim,2)[:dim//2].float()/dim))),1.0
     #判断是否要使用yarn以及yarn的参数配置
+    # orig_max: 模型预训练时的原始最大长度（例如 Llama-2 是 2048 或 4096）
+    # factor: 要扩展的倍数 s (比如从 2k 扩展到 32k，factor 就是 16)
+    # beta_fast (对应论文中的 α): 高频边界，波长比例大于此值的维度不缩放
+    # beta_slow (对应论文中的 β): 低频边界，波长比例小于此值的维度全量缩放
+    # attn_factor: 注意力温度补偿，由于距离拉长导致注意力分布发散（变平缓），需要乘上一个系数让注意力重新“聚焦”
     if rope_scaling is not None:
         orig_max,factor,beta_fast,beta_slow ={
             rope_scaling["orginal_max_position_embeddings"],
@@ -392,3 +400,53 @@ class MokioMindModel(nn.Module):
             hidden_states=self.norm(hidden_states)
 
             return hidden_states,presents
+
+class MokioMindForCausalLM(PreTrainedModel,GenerationMixin):
+    config_class=MokioMindConfig
+
+    def __init__(self, config: MokioMindConfig):
+        self.config=config
+
+        super().__init__(config)
+
+        self.model=MokioMindModel(config)
+        #语言头，把输出的隐藏态映射到整个词表上 即Embedding的反向，vector->token
+        self.lm_head=nn.Linear(config.hidden_size,config.vocab_size,bias=False)
+        #权重共享
+        #输出层的权重与嵌入层的权重共享 因为初始Embedding时就是使用一个权重矩阵来将token转化为vector[tokens数，向量维度]
+        #为何不转置是因为pytorch里计算实际是Y=XW^T+b 本身具有转置所以可以相乘
+        self.model.embed_tokens.weight=self.lm_head.weight
+
+        self.OUT=CausalLMOutputWithPast()#huggingface封装输出标准化
+
+    def forward(
+        self,
+        input_ids: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        labels: Optional[torch.Tensor] = None,
+        past_key_values: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = None,
+        use_cache: bool = False,
+        logits_to_keep: Union[int, torch.Tensor] = 0,
+        **args,
+    ):
+        hidden_states,past_key_values = self.model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
+            **args,
+        )
+        #logits to keep 是整数，那就保留最后n个位置
+        #生成的时候只需要最后的logits来预测下一个位置
+        slice_indices = (
+            slice(-logits_to_keep, None)
+            if isinstance(logits_to_keep, int)
+            else logits_to_keep
+        )
+        logits = self.lm_head(hidden_states[:, slice_indices, :])
+
+        self.OUT.__setitem__("last_hidden_state",hidden_states)
+        self.OUT.__setitem__("logits",logits)
+        self.OUT.__setitem__("past_key_values",past_key_values)
+
+        return self.OUT
