@@ -15,9 +15,9 @@ from torch import optim  # 优化器
 from torch.nn.parallel import DistributedDataParallel  # 分布式数据并行
 from torch.utils.data import DataLoader, DistributedSampler  # 数据加载器
 
-from model.MokioModel import MokioMindConfig
-from dataset.lm_dataset import PretrainDataset
-from trainer.trainer_utils import (  # 训练工具函数
+from Model.Model import MokioMindConfig
+from dataset.dataset import PretrainDataset
+from Trainer.train_utils import (  # 训练工具函数
     get_lr,
     Logger,
     is_main_process,
@@ -35,7 +35,45 @@ warnings.filterwarnings("ignore")
 def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
     start_time = time.time()  # 记录开始时间
 
-    
+    #遍历数据批次循环
+    for step,batch in enumerate(loader,start=start_step+1):
+        input_ids=batch["input_ids"]
+        labels=batch["labels"]
+        attention_mask=batch["attention_mask"]
+        #将数据转移到指定设备，一般是GPU
+        input_ids = input_ids.to(args.device)
+        labels = labels.to(args.device)
+        attention_mask = attention_mask.to(args.device)
+
+        lr=get_lr(epoch*iters+step,args.epochs*iters,args.learning_rate)
+
+        for param_group in optimizer.param_groups:
+            param_group["lr"]=lr
+
+        with autocast_ctx:
+            #前向传播
+            res=model(input_ids,labels=labels,attention_mask=attention_mask)
+            #loss计算
+            loss=(res.loss+res.aux_loss)
+            loss=loss/args.accumulation_steps
+        #反向传播
+        scaler.scale(loss).backward()
+
+        
+        if step % args.accumulation_steps == 0:
+            # scaler.unscale_(): 还原梯度的真实值
+            scaler.unscale_(optimizer)
+
+            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+
+            # 📚 优化器更新知识点
+            # scaler.step(): 执行参数更新
+            # scaler.update(): 更新scaler的缩放因子
+            scaler.step(optimizer)
+            scaler.update()
+
+            optimizer.zero_grad(set_to_none=True)
+
 
         if step % args.log_interval == 0 or step == iters:
             spend_time = time.time() - start_time
