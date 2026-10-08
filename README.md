@@ -67,10 +67,6 @@ mkdir -p logs
   2>&1 | tee logs/pretrain_v1.log
 ```
 
-- 权重输出到 `out/`，断点续训状态输出到 `checkpoints/`（`--from_resume 1` 续训，需保持 `--epochs` 不变）。
-- 建议带 `| tee` 保留日志，之后可用 `Tools/plot_log.py` 画 loss / lr 曲线。
-- 8 GB 显存的机器上请用 `--batch_size 16`（或更小）；默认的 32 会触发显存耗尽并大幅降速。
-
 ## 目录
 
 ```
