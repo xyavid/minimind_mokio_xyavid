@@ -156,6 +156,10 @@ def apply_rotary_pos_emb(q,k,cos,sin,position_ids=None,unsqueeze_dim=1):
         return torch.cat(
             (-x[..., x.shape[-1] // 2 :], x[..., : x.shape[-1] // 2]), dim=-1
         )
+    #cos/sin 有两种形态：[S,D]（默认，无 batch 维）与 [B,S,D]（传入 position_ids 时）
+    #需要分别 unsqueeze 成 [S,1,D] / [B,S,1,D]，才能与 q[B,S,H,D] 正确广播
+    if cos.dim()==q.dim()-1:
+        unsqueeze_dim=q.dim()-2
     #x_rotated=x*cos+rotate_half(x)*sin 半边半边相乘
     q_embed = (q * cos.unsqueeze(unsqueeze_dim)) + (
         rotate_half(q) * sin.unsqueeze(unsqueeze_dim)
@@ -236,16 +240,18 @@ class Attention(nn.Module):
         )
 
         #attention计算
-        if self.flash and seq_len>1 and (past_key_value is None ) and (attention_mask is None or torch.all(attention_mask == 1)):
-            # #padding mask，判断是否参与attention计算
-            # attn_mask=(
-            #     None
-            #     if attention_mask is None
-            #     #如果需要mask，那么把attn_mask扩展到与attention score一样的维度，一一对齐，[bsz,head,q_seq_len,k_seq_len]S
-            #     else attention_mask.view(bsz,1,1,-1).expand(bsz,self.n_local_heads,seq_len,-1).bool()
-            # )
+        if self.flash and seq_len>1 and (past_key_value is None):
+            #padding mask：0/1 的 key 掩码，True=参与计算（与手写分支 (1-mask)*-1e9 语义一致）
+            #SDPA 支持 is_causal 与 attn_mask 同时使用；bf16 下走 mem-efficient 内核，
+            #不再需要把 [bsz,heads,seq_len,seq_len] 的分数矩阵显式物化出来
+            #约定 attention_mask 为 [bsz,k_len] 的 0/1 张量（本项目的 dataset 即如此）
+            attn_mask=(
+                None
+                if attention_mask is None
+                else attention_mask[:,None,None,:].bool()
+            )
             output=F.scaled_dot_product_attention(
-                xq,xk,xv,dropout_p=self.dropout if self.training else 0.0,is_causal=True
+                xq,xk,xv,attn_mask=attn_mask,dropout_p=self.dropout if self.training else 0.0,is_causal=True
             )
         else:
             #不使用flash attention，手写实现attention计算
@@ -352,8 +358,7 @@ class MokioMindModel(nn.Module):
             rope_scaling=config.rope_scaling
         )
 
-        self.freqs_cos = freqs_cos
-        self.freqs_sin = freqs_sin
+        
         self.register_buffer("freqs_cos",freqs_cos,persistent=False)
         self.register_buffer("freqs_sin",freqs_sin,persistent=False)
 
@@ -361,8 +366,10 @@ class MokioMindModel(nn.Module):
             self,
             input_ids:Optional[torch.Tensor],
             attention_mask:Optional[torch.Tensor]=None,
+            position_ids:Optional[torch.Tensor]=None,
             past_key_values = None,
             use_cache:bool=False,
+            output_hidden_states:bool=False,
             **kwargs,
         ):
             batch_size,seq_len=input_ids.shape
@@ -381,15 +388,26 @@ class MokioMindModel(nn.Module):
             #     freqs_cos, freqs_sin = precompute_freqs_cis(dim=self.config.head_dim, end=self.config.max_position_embeddings, rope_base=self.config.rope_theta, rope_scaling=self.config.rope_scaling)
             #     self.freqs_cos, self.freqs_sin = freqs_cos.to(hidden_states.device), freqs_sin.to(hidden_states.device)
             
-            #位置编码
+            #超长保护：RoPE 只预计算到 max_position_embeddings
+            if start_pos+seq_len>self.freqs_cos.shape[0]:
+                raise ValueError(
+                    f"sequence length {start_pos+seq_len} exceeds max_position_embeddings {self.freqs_cos.shape[0]}"
+                )
+            #位置编码：支持外部传入 position_ids（左 padding 批量推理必需）
+            if position_ids is None:
+                position_ids=torch.arange(start_pos,start_pos+seq_len,device=hidden_states.device)
             position_embeddings=(
-                self.freqs_cos[start_pos:start_pos+seq_len],
-                self.freqs_sin[start_pos:start_pos+seq_len]
+                self.freqs_cos[position_ids],
+                self.freqs_sin[position_ids]
             )
             #缓存列表，收集kv cache
             presents=[]
+            #按需收集各层隐藏态（HF 契约：tuple，含 embedding 输出与最终 norm 输出）
+            all_hidden_states=() if output_hidden_states else None
             #Transformer layers
             for layer_idx,(layer,past_key_value) in enumerate(zip(self.layers,past_key_values)):
+                if output_hidden_states:
+                    all_hidden_states=all_hidden_states+(hidden_states,)
                 hidden_states,present=layer(
                     hidden_states,
                     position_embeddings,
@@ -401,8 +419,10 @@ class MokioMindModel(nn.Module):
                 presents.append(present)
             #RMSNorm
             hidden_states=self.norm(hidden_states)
+            if output_hidden_states:
+                all_hidden_states=all_hidden_states+(hidden_states,)
 
-            return hidden_states,presents
+            return hidden_states,presents,all_hidden_states
 
 class MokioMindForCausalLM(PreTrainedModel,GenerationMixin):
     config_class=MokioMindConfig
@@ -425,17 +445,21 @@ class MokioMindForCausalLM(PreTrainedModel,GenerationMixin):
         self,
         input_ids: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
         labels: Optional[torch.Tensor] = None,
         past_key_values: Optional[List[Tuple[torch.Tensor, torch.Tensor]]] = None,
         use_cache: bool = False,
+        output_hidden_states: bool = False,
         logits_to_keep: Union[int, torch.Tensor] = 0,
         **args,
     ):
-        hidden_states,past_key_values = self.model(
+        hidden_states,past_key_values,all_hidden_states = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
+            position_ids=position_ids,
             past_key_values=past_key_values,
             use_cache=use_cache,
+            output_hidden_states=output_hidden_states,
             **args,
         )
         #logits to keep 是整数，那就保留最后n个位置
@@ -448,9 +472,25 @@ class MokioMindForCausalLM(PreTrainedModel,GenerationMixin):
         logits = self.lm_head(hidden_states[:, slice_indices, :])
 
 
-        return CausalLMOutputWithPast(
-        logits=logits,
-        past_key_values=past_key_values,
-        hidden_states=hidden_states
+        loss = None
+        if labels is not None:
+            # 计算 loss 必须用完整序列，否则 shift 后与 labels 错位
+            if not (isinstance(logits_to_keep, int) and logits_to_keep == 0):
+                raise ValueError("labels 与 logits_to_keep>0 不能同时使用，请令 logits_to_keep=0")
+            # 对齐 HF ForCausalLMLoss：先升 fp32 再算 CE，避免 bf16 精度损失
+            shift_logits = logits[..., :-1, :].float().contiguous()
+            shift_labels = labels[..., 1:].to(shift_logits.device).contiguous()
+            loss = F.cross_entropy(
+                shift_logits.view(-1, shift_logits.size(-1)),
+                shift_labels.view(-1),
+                ignore_index=-100,
+            )
+
+        output = CausalLMOutputWithPast(
+            loss=loss,
+            logits=logits,
+            past_key_values=past_key_values,
+            hidden_states=all_hidden_states,
         )
-    
+        # 若接入 MoE，请改用 MoECausalLMOutputWithPast(..., aux_loss=...)
+        return output

@@ -133,14 +133,14 @@ def init_model(
     device="cuda",
 ):
     from transformers import AutoTokenizer
-    from model.MokioModel import MokioMindForCausalLM
+    from Model.Model import MokioMindForCausalLM
 
     # 如果没有指定 tokenizer_path，使用项目根目录下的 model 文件夹
     if tokenizer_path is None:
         # 获取当前文件所在目录的父目录（项目根目录）
         current_dir = os.path.dirname(os.path.abspath(__file__))
         project_root = os.path.dirname(current_dir)
-        tokenizer_path = os.path.join(project_root, "model")
+        tokenizer_path = os.path.join(project_root, "Model")
 
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
 

@@ -3,7 +3,8 @@ import sys
 
 
 __package__ = "trainer"
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.append(PROJECT_ROOT)
 
 import argparse  # 命令行参数解析
 import time  # 时间统计
@@ -53,8 +54,11 @@ def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
         with autocast_ctx:
             #前向传播
             res=model(input_ids,labels=labels,attention_mask=attention_mask)
-            #loss计算
-            loss=(res.loss+res.aux_loss)
+            #loss计算：MoE 模型才有 aux_loss，稠密模型该字段不存在/为 None
+            loss=res.loss
+            aux_loss=getattr(res,"aux_loss",None)
+            if aux_loss is not None:
+                loss=loss+aux_loss
             loss=loss/args.accumulation_steps
         #反向传播
         scaler.scale(loss).backward()
@@ -123,7 +127,7 @@ def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
                 epoch=epoch,
                 step=step,
                 wandb=wandb,
-                save_dir="../checkpoints",  # ！修正：原"checkpoints"缺少../前缀
+                save_dir=os.path.join(PROJECT_ROOT, "checkpoints"),
             )
 
             model.train()  # 恢复训练模式
@@ -134,8 +138,8 @@ if __name__ == "__main__":
 
     # ========== 基础训练参数 ==========
     parser.add_argument(
-        "--save_dir", type=str, default="../out", help="模型保存目录"
-    )  # ！修正：原"out"缺少../前缀
+        "--save_dir", type=str, default=os.path.join(PROJECT_ROOT, "out"), help="模型保存目录"
+    )
     parser.add_argument(
         "--save_weight", default="pretrain", type=str, help="保存权重的前缀名"
     )
@@ -181,7 +185,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--data_path",
         type=str,
-        default="../dataset/pretrain_hq.jsonl",  # ！修正：原"dataset/..."缺少../前缀
+        default=os.path.join(PROJECT_ROOT, "dataset", "pretrain_t2t_mini.jsonl"),
         help="预训练数据路径",
     )
     parser.add_argument(
@@ -243,8 +247,8 @@ if __name__ == "__main__":
     # 如果开启了断点续训，尝试加载之前的训练状态
     ckp_data = (
         lm_checkpoint(
-            lm_config, weight=args.save_weight, save_dir="../checkpoints"
-        )  # ！修正：原"checkpoints"缺少../前缀
+            lm_config, weight=args.save_weight, save_dir=os.path.join(PROJECT_ROOT, "checkpoints")
+        )
         if args.from_resume == 1
         else None
     )
@@ -323,7 +327,7 @@ if __name__ == "__main__":
     if dist.is_initialized():
         # 📚 RoPE位置编码特殊处理
         # freqs_cos, freqs_sin是位置编码缓存，不需要梯度同步
-        model._ddp_params_and_buffers_to_ignore = {"freqs_cos", "freqs_sin"}
+        model._ddp_params_and_buffers_to_ignore = {"model.freqs_cos", "model.freqs_sin"}
         model = DistributedDataParallel(model, device_ids=[local_rank])
 
     for epoch in range(start_epoch, args.epochs):

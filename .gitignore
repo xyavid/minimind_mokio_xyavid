@@ -8,3 +8,14 @@ wheels/
 
 # Virtual environments
 .venv
+
+# 本地工具与产物，不纳入版本管理
+/Tools/
+/snapshots/
+
+# 大文件：语料与训练产物，不纳入版本管理
+/dataset/*.jsonl
+/checkpoints/
+
+# Windows 下载标记文件
+*:Zone.Identifier

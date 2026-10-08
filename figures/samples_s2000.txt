@@ -1,0 +1,17 @@
+### 生成样例 — s2000
+
+[prompt] 人工智能的未来
+[output] 人工智能的未来。人工智能的应用广泛应用越来越广泛的越来越重要。
+
+[prompt] 如何学习编程
+[output] 如何学习编程，提高编程的能力。
+
+[prompt] 北京是中国的
+[output] 北京是中国的 北京的  ， 广 美       |  东  |  北京  | 北京 | 北京  | X  | 北京 | 北京  |  |  | 北京 | 北京 | 北京 || 北京 | 2     | 北京 | 北京 | 北京 ||  |||---
+
+[prompt] The capital of France is
+[output] The capital of France is the correct of in the number of:  
+$$
+
+This
+

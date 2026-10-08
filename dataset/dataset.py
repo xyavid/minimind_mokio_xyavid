@@ -26,9 +26,9 @@ class PretrainDataset(Dataset):
             sample=self.samples[index] #分出样本
             #tokenizer将文本转化为input_id
             tokens = self.tokenizer(
-                str(sample["text"])
-                add_special_tokens=False
-                max_length=self.max_length-2
+                str(sample["text"]),
+                add_special_tokens=False,
+                max_length=self.max_length-2,
                 truncation=True
             ).input_ids
             #添加上bos eos还有pad填充
@@ -37,7 +37,7 @@ class PretrainDataset(Dataset):
             input_ids=torch.tensor(input_ids,dtype=torch.long)#转化成tensor
             #clone input_ids，然后给pad赋值-100，这样可以在后续的loss计算时忽略pad影响,也即忽略这些pad位置的loss计算
             labels=input_ids.clone()
-            labels=[labels == self.tokenizer.pad_token_id] = -100
+            labels[labels == self.tokenizer.pad_token_id] = -100
             #编写attention mask来不让pad进入attention计算
             attention_mask = (input_ids != self.tokenizer.pad_token_id).long()#非pad位置为1，pad为0
             return {
